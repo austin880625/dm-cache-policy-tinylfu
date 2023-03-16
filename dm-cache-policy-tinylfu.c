@@ -240,10 +240,6 @@ static struct entry *alloc_get_entry_at(struct entry_alloc *ea, unsigned int blo
 
 	BUG_ON(e >= ea->es->end);
 
-	l_del(ea->es, &ea->free, e);
-	init_entry(e);
-	ea->nr_allocated++;
-
 	return e;
 }
 
@@ -735,6 +731,7 @@ static void complete_background_work_(struct tinylfu_policy *lfu,
 		if (success) {
 			e->oblock = work->oblock;
 			l_add_head(lfu->cache_alloc.es, &lfu->lru, e);
+			h_insert(&lfu->htable, e);
 		} else {
 			free_entry(&lfu->cache_alloc, e);
 		}
@@ -913,9 +910,9 @@ static int tinylfu_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock,
 					     from_cblock(cblock));
 
 	spin_lock_irqsave(&lfu->lock, flags);
+	init_entry(e);
 	e->oblock = oblock;
 	e->dirty = dirty;
-	clear_pending(e);
 	h_insert(&lfu->htable, e);
 	spin_unlock_irqrestore(&lfu->lock, flags);
 
