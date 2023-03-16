@@ -814,6 +814,7 @@ static int tinylfu_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
 	unsigned long flags;
 
 	spin_lock_irqsave(&lfu->lock, flags);
+	*background_queued = false;
 	e = h_lookup(&lfu->htable, oblock);
 	if (e) {
 		tinylfu_stats_hit(&lfu->stats);
