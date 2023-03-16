@@ -239,7 +239,6 @@ static struct entry *alloc_get_entry_at(struct entry_alloc *ea, unsigned int blo
 	struct entry *e = ea->es->begin + block;
 
 	BUG_ON(e >= ea->es->end);
-	BUG_ON(e->allocated);
 
 	l_del(ea->es, &ea->free, e);
 	init_entry(e);
@@ -578,7 +577,7 @@ static void tinylfu_stats_miss(struct tinylfu_stats *s)
 struct tinylfu_policy {
 	struct dm_cache_policy policy;
 	spinlock_t lock;
-	struct tinylfu_hash_table *htable;
+	struct tinylfu_hash_table htable;
 	struct tinylfu_stats stats;
 
 	struct entry_space es;
@@ -653,7 +652,7 @@ static bool try_promotion(struct tinylfu_policy *lfu, dm_oblock_t oblock,
 	return true;
 }
 
-static void enqueue_eviction(struct tinylfu_policy *lfu, struct entry *victim,
+static bool enqueue_eviction(struct tinylfu_policy *lfu, struct entry *victim,
 			     dm_oblock_t replacement)
 {
 	int r;
@@ -661,14 +660,14 @@ static void enqueue_eviction(struct tinylfu_policy *lfu, struct entry *victim,
 	struct policy_work work;
 
 	if (!lfu->migration_allowed)
-		return;
+		return false;
 
 	// We want to add the replacement into backlog and demote the victim
 	// first, once the work done then we queue the promotion from the
 	// backlog list.
 	e = alloc_get_entry(&lfu->backlog_alloc);
 	if (!e)
-		return ;
+		return false;
 	
 	e->oblock = replacement;
 	l_add_tail(lfu->backlog_alloc.es, &lfu->promotion_backlog, e);
@@ -685,7 +684,9 @@ static void enqueue_eviction(struct tinylfu_policy *lfu, struct entry *victim,
 		tinylfu_push_entry(lfu, victim);
 		l_del(lfu->backlog_alloc.es, &lfu->promotion_backlog, e);
 		free_entry(&lfu->backlog_alloc, e);
+		return false;
 	}
+	return true;
 }
 
 static void promote_backlog(struct tinylfu_policy *lfu)
@@ -741,7 +742,7 @@ static void complete_background_work_(struct tinylfu_policy *lfu,
 
 	case POLICY_DEMOTE:
 		if (success) {
-			h_remove(lfu->htable, e);
+			h_remove(&lfu->htable, e);
 			free_entry(&lfu->cache_alloc, e);
 			promote_backlog(lfu);
 		} else {
@@ -772,9 +773,10 @@ static void tinylfu_update_hit_(struct tinylfu_policy *lfu, struct entry *e)
 		dk_reset(lfu->dk);
 }
 
-static void tinylfu_update_miss_(struct tinylfu_policy *lfu,
+static bool tinylfu_update_miss_(struct tinylfu_policy *lfu,
 				 dm_oblock_t oblock)
 {
+	bool r = false;
 	bool allow;
 	bool need_reset;
 	unsigned long victim_cnt, new_cnt;
@@ -788,18 +790,21 @@ static void tinylfu_update_miss_(struct tinylfu_policy *lfu,
 
 	if (allow) {
 		if (try_promotion(lfu, oblock, false)) {
-			return ;
+			return true;
 		}
 
 		victim = l_tail(lfu->cache_alloc.es, &lfu->lru);
-		victim_cnt = cm4_estimate(lfu->sketch,
-					from_oblock(victim->oblock));
-		new_cnt = cm4_estimate(lfu->sketch,
-					from_oblock(oblock));
-		if (new_cnt > victim_cnt) {
-			enqueue_eviction(lfu, victim, oblock);
+		if (victim) {
+			victim_cnt = cm4_estimate(lfu->sketch,
+						from_oblock(victim->oblock));
+			new_cnt = cm4_estimate(lfu->sketch,
+						from_oblock(oblock));
+			if (new_cnt > victim_cnt) {
+				r = enqueue_eviction(lfu, victim, oblock);
+			}
 		}
 	}
+	return r;
 }
 
 static int tinylfu_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
@@ -812,7 +817,7 @@ static int tinylfu_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
 	unsigned long flags;
 
 	spin_lock_irqsave(&lfu->lock, flags);
-	e = h_lookup(lfu->htable, oblock);
+	e = h_lookup(&lfu->htable, oblock);
 	if (e) {
 		tinylfu_stats_hit(&lfu->stats);
 
@@ -822,7 +827,7 @@ static int tinylfu_lookup(struct dm_cache_policy *p, dm_oblock_t oblock,
 	} else {
 		tinylfu_stats_miss(&lfu->stats);
 
-		tinylfu_update_miss_(lfu, oblock);
+		*background_queued = tinylfu_update_miss_(lfu, oblock);
 		ret = -ENOENT;
 	}
 	spin_unlock_irqrestore(&lfu->lock, flags);
@@ -847,7 +852,7 @@ static int tinylfu_get_background_work(struct dm_cache_policy *p, bool idle,
 	}
 	spin_unlock_irqrestore(&lfu->lock, flags);
 
-	return 0;
+	return r;
 }
 
 static void tinylfu_complete_background_work(struct dm_cache_policy *p,
@@ -911,7 +916,7 @@ static int tinylfu_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock,
 	e->oblock = oblock;
 	e->dirty = dirty;
 	clear_pending(e);
-	h_insert(lfu->htable, e);
+	h_insert(&lfu->htable, e);
 	spin_unlock_irqrestore(&lfu->lock, flags);
 
 	return 0;
@@ -926,7 +931,7 @@ static int tinylfu_invalidate_mapping(struct dm_cache_policy *p, dm_cblock_t cbl
 		return -ENODATA;
 
 	tinylfu_remove_entry(lfu, e);
-	h_remove(lfu->htable, e);
+	h_remove(&lfu->htable, e);
 	free_entry(&lfu->cache_alloc, e);
 
 	return 0;
@@ -1029,7 +1034,7 @@ static struct dm_cache_policy *tinylfu_create(dm_cblock_t cache_size,
 		goto bad_dk_alloc;
 	}
 
-	r = h_init(lfu->htable, &lfu->es, from_cblock(cache_size));
+	r = h_init(&lfu->htable, &lfu->es, from_cblock(cache_size));
 	if (r) {
 		DMERR("hash table allocation failed");
 		goto bad_htable_alloc;
@@ -1042,6 +1047,7 @@ static struct dm_cache_policy *tinylfu_create(dm_cblock_t cache_size,
 
 	spin_lock_init(&lfu->lock);
 	lfu->bg_work = btracker_create(4096); /* FIXME: hard coded value */
+	lfu->migration_allowed = true;
 
 	return &lfu->policy;
 bad_pool_init:
