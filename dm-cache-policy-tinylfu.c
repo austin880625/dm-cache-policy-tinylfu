@@ -533,12 +533,7 @@ static bool dk_allow(struct doorkeeper *dk, unsigned long x)
 
 static void dk_reset(struct doorkeeper *dk)
 {
-	int i;
-	int length = (dk->size >> 3) + 1;
-
-	for (i = 0; i < length; i++) {
-		dk->filter[i] = 0;
-	}
+	clear_bitset(dk->filter, dk->size);
 }
 
 /*----------------------------------------------------------------*/
