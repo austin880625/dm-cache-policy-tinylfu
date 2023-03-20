@@ -727,7 +727,7 @@ static void complete_background_work_(struct tinylfu_policy *lfu,
 		clear_pending(e);
 		if (success) {
 			e->oblock = work->oblock;
-			l_add_head(lfu->cache_alloc.es, &lfu->lru, e);
+			tinylfu_push_entry(lfu, e);
 			h_insert(&lfu->htable, e);
 		} else {
 			free_entry(&lfu->cache_alloc, e);
@@ -741,13 +741,13 @@ static void complete_background_work_(struct tinylfu_policy *lfu,
 			promote_backlog(lfu);
 		} else {
 			clear_pending(e);
-			l_add_head(lfu->cache_alloc.es, &lfu->lru, e);
+			tinylfu_push_entry(lfu, e);
 		}
 		break;
 
 	case POLICY_WRITEBACK:
 		clear_pending(e);
-		l_add_head(lfu->cache_alloc.es, &lfu->lru, e);
+		tinylfu_push_entry(lfu, e);
 		break;
 	}
 
@@ -789,6 +789,9 @@ static bool tinylfu_update_miss_(struct tinylfu_policy *lfu,
 
 		victim = l_tail(lfu->cache_alloc.es, &lfu->lru);
 		if (victim) {
+			if (victim->pending_work)
+				return false;
+
 			victim_cnt = cm4_estimate(lfu->sketch,
 						from_oblock(victim->oblock));
 			new_cnt = cm4_estimate(lfu->sketch,
