@@ -229,7 +229,9 @@ static void entry_alloc_init(struct entry_alloc *ea, struct entry_space *es,
 	if (!es)
 		return;
 	ea->es = es;
+	ilist_init(&ea->free);
 	for (e = ea->es->begin + begin; e != ea->es->begin + begin + size; e++) {
+		e->allocated = false;
 		l_add_tail(ea->es, &ea->free, e);
 	}
 }
@@ -907,10 +909,14 @@ static int tinylfu_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock,
 {
 	unsigned long flags;
 	struct tinylfu_policy *lfu = to_tinylfu_policy(p);
-	struct entry *e = alloc_get_entry_at(&lfu->cache_alloc,
-					     from_cblock(cblock));
+	struct entry *e;
 
 	spin_lock_irqsave(&lfu->lock, flags);
+	e = alloc_get_entry_at(&lfu->cache_alloc,
+				from_cblock(cblock));
+	if (!e->allocated) {
+		l_del(lfu->cache_alloc.es, &lfu->cache_alloc.free, e);
+	}
 	init_entry(e);
 	e->oblock = oblock;
 	e->dirty = dirty;
