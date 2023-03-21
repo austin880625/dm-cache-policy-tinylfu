@@ -180,7 +180,8 @@ static void l_del(struct entry_space *es, struct ilist *l, struct entry *e)
 	else
 		l->tail = e->prev;
 
-	l->nr_elts--;
+	if (prev || next)
+		l->nr_elts--;
 }
 
 static struct entry *l_pop_head(struct entry_space *es, struct ilist *l)
@@ -249,11 +250,11 @@ static struct entry *alloc_get_entry(struct entry_alloc *ea)
 {
 	struct entry *e = l_pop_tail(ea->es, &ea->free);
 	
-	BUG_ON(e >= ea->es->end);
-	BUG_ON(e->allocated);
-
 	if (!e)
 		return NULL;
+
+	BUG_ON(e >= ea->es->end);
+	BUG_ON(e->allocated);
 
 	init_entry(e);
 	ea->nr_allocated++;
@@ -686,11 +687,14 @@ static void promote_backlog(struct tinylfu_policy *lfu)
 {
 	struct entry *e = l_head(lfu->backlog_alloc.es,
 				&lfu->promotion_backlog);
+	bool r;
 
-	try_promotion(lfu, e->oblock, true);
+	r = try_promotion(lfu, e->oblock, true);
 
-	l_del(lfu->backlog_alloc.es, &lfu->promotion_backlog, e);
-	free_entry(&lfu->backlog_alloc, e);
+	if (r) {
+		l_del(lfu->backlog_alloc.es, &lfu->promotion_backlog, e);
+		free_entry(&lfu->backlog_alloc, e);
+	}
 }
 
 static void enqueue_writeback(struct tinylfu_policy *lfu, bool idle)
@@ -914,6 +918,7 @@ static int tinylfu_load_mapping(struct dm_cache_policy *p, dm_oblock_t oblock,
 				from_cblock(cblock));
 	if (!e->allocated) {
 		l_del(lfu->cache_alloc.es, &lfu->cache_alloc.free, e);
+		lfu->cache_alloc.nr_allocated++;
 	}
 	init_entry(e);
 	e->oblock = oblock;
@@ -1043,6 +1048,7 @@ static struct dm_cache_policy *tinylfu_create(dm_cblock_t cache_size,
 	}
 
 	ilist_init(&lfu->lru);
+	ilist_init(&lfu->dirty);
 	ilist_init(&lfu->promotion_backlog);
 	
 	tinylfu_stats_init(&lfu->stats);
